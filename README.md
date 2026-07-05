@@ -1,42 +1,35 @@
-# RegisterKaro Billing Platform
+# BillFlow — Subscription Billing Platform
 
-Subscription billing product built for the RegisterKaro engineering take-home assignment.
+A subscription billing product with plans, checkout, payments, invoices, and email notifications.
 
 **Stack:** Next.js 15 · React · Node.js API routes · MongoDB · Razorpay (test mode) · Nodemailer
 
 ## Features
 
-- JWT auth (register / login)
+- JWT authentication (register / login)
 - Plans page with Razorpay checkout
 - Subscription dashboard (status, upgrade, downgrade, cancel)
 - Billing history (invoices)
 - Webhook handler with idempotency (`payment.captured`, `order.paid`, `payment.failed`)
-- Email notifications (subscription, payment, invoice, cancel, plan change)
+- Transactional email notifications
 
-## Quick start (< 10 minutes)
+## Quick start
 
-### 1. Prerequisites
+### Prerequisites
 
 - Node.js 18+
-- MongoDB running locally or [MongoDB Atlas](https://www.mongodb.com/atlas) free tier
+- MongoDB ([local install](https://www.mongodb.com/try/download/community) or [MongoDB Atlas](https://www.mongodb.com/atlas))
 
-### 2. Install
+### Install and run
 
 ```bash
-git clone <your-repo-url>
+git clone <repo-url>
 cd registerkaro-billing
 npm install
-```
-
-### 3. Environment
-
-```bash
 cp .env.example .env.local
 ```
 
-Fill in values (see [Environment variables](#environment-variables)).
-
-### 4. Run
+Fill in `.env.local` (see [Environment variables](#environment-variables)), then:
 
 ```bash
 npm run dev
@@ -44,15 +37,25 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000)
 
-### 5. Test payment flow
+### MongoDB connection note
+
+If you see `querySrv ECONNREFUSED` with Atlas, use the **standard** `mongodb://` connection string from the Atlas dashboard instead of `mongodb+srv://`, or use a local URI:
+
+```env
+MONGODB_URI=mongodb://127.0.0.1:27017/registerkaro-billing
+```
+
+Ensure Atlas **Network Access** allows your IP (or `0.0.0.0/0` for development).
+
+### Test payment flow
 
 1. Register → choose a plan → pay with Razorpay test card: `4111 1111 1111 1111`, any future expiry, any CVV
-2. Dashboard shows active subscription + invoice
+2. Dashboard shows active subscription and paid invoice
 3. Try upgrade (Razorpay opens for prorated charge) and cancel
 
-### 6. Webhooks (local)
+### Webhooks (local development)
 
-Razorpay cannot reach `localhost` directly. Use ngrok:
+Razorpay cannot reach `localhost` directly. Use a tunnel such as ngrok:
 
 ```bash
 npx ngrok http 3000
@@ -60,23 +63,23 @@ npx ngrok http 3000
 
 In Razorpay Dashboard → **Webhooks**:
 
-- URL: `https://<ngrok-id>.ngrok-free.app/api/webhooks/razorpay`
+- URL: `https://<your-tunnel-host>/api/webhooks/razorpay`
 - Events: `payment.captured`, `order.paid`, `payment.failed`
-- Copy webhook secret → `RAZORPAY_WEBHOOK_SECRET` in `.env.local`
+- Copy the webhook secret into `RAZORPAY_WEBHOOK_SECRET`
 
-> Client-side `/api/checkout/verify` also activates subscriptions immediately after payment (webhook is backup).
+Client-side `/api/checkout/verify` also confirms payments immediately after checkout. Webhooks serve as a server-to-server backup when the app is publicly reachable.
 
-### 7. Email (dev)
+### Email (development)
 
-Use [Ethereal](https://ethereal.email) — create account, copy SMTP creds to `.env.local`. Emails appear in Ethereal inbox, not real Gmail.
+Use [Ethereal](https://ethereal.email) for a fake SMTP inbox, or configure Gmail / SendGrid credentials in `.env.local`.
 
-### 8. Tests
+### Tests
 
 ```bash
 npm test
 ```
 
-Covers webhook idempotency helpers, signature verification, and proration math.
+Covers webhook idempotency helpers, Razorpay signature verification, and upgrade proration.
 
 ## Environment variables
 
@@ -84,14 +87,14 @@ Covers webhook idempotency helpers, signature verification, and proration math.
 |----------|-------------|
 | `MONGODB_URI` | MongoDB connection string |
 | `JWT_SECRET` | Secret for signing JWTs |
-| `RAZORPAY_KEY_ID` | Test key from Razorpay dashboard |
-| `RAZORPAY_KEY_SECRET` | API key secret |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook signing secret (different from API secret) |
+| `RAZORPAY_KEY_ID` | Razorpay key ID (test mode) |
+| `RAZORPAY_KEY_SECRET` | Razorpay API key secret |
+| `RAZORPAY_WEBHOOK_SECRET` | Webhook signing secret (separate from API secret) |
 | `EMAIL_HOST` | SMTP host |
-| `EMAIL_PORT` | SMTP port (587) |
+| `EMAIL_PORT` | SMTP port (default 587) |
 | `EMAIL_USER` | SMTP username |
 | `EMAIL_PASS` | SMTP password |
-| `EMAIL_FROM` | From address |
+| `EMAIL_FROM` | Sender address |
 
 ## API routes
 
@@ -99,25 +102,25 @@ Covers webhook idempotency helpers, signature verification, and proration math.
 |--------|-------|-------------|
 | POST | `/api/auth/register` | Create account |
 | POST | `/api/auth/login` | Login |
-| GET | `/api/plans` | List plans (auto-seeds 3 plans) |
-| POST | `/api/checkout` | Create order + pending subscription |
-| POST | `/api/checkout/verify` | Verify payment signature, activate |
+| GET | `/api/plans` | List plans (seeds defaults if empty) |
+| POST | `/api/checkout` | Create order and pending subscription |
+| POST | `/api/checkout/verify` | Verify payment signature and activate |
 | GET | `/api/subscriptions` | Current subscription |
-| POST | `/api/subscriptions/upgrade` | Upgrade/downgrade |
-| POST | `/api/subscriptions/cancel` | Cancel at period end |
+| POST | `/api/subscriptions/upgrade` | Upgrade or downgrade plan |
+| POST | `/api/subscriptions/cancel` | Schedule cancellation at period end |
 | GET | `/api/invoices` | Billing history |
-| POST | `/api/webhooks/razorpay` | Razorpay webhook |
+| POST | `/api/webhooks/razorpay` | Razorpay webhook endpoint |
 
 ## Project structure
 
 ```
 src/
-├── app/           # Pages + API routes (Next.js App Router)
+├── app/           # Pages and API routes (Next.js App Router)
 ├── components/    # Navbar, AuthProvider
-├── lib/           # DB, auth, payments, email, webhook helpers
+├── lib/           # Database, auth, payments, email, webhook helpers
 └── models/        # Mongoose schemas
 __tests__/         # Jest tests
-ARCHITECTURE.md    # Design decisions (read this for the interview)
+ARCHITECTURE.md    # Design decisions and flow documentation
 ```
 
 ## Scripts
@@ -127,16 +130,8 @@ ARCHITECTURE.md    # Design decisions (read this for the interview)
 | `npm run dev` | Development server |
 | `npm run build` | Production build |
 | `npm start` | Run production build |
-| `npm test` | Run tests |
+| `npm test` | Run test suite |
 
-## Screen recording checklist (3–5 min)
+## Documentation
 
-1. Register → subscribe → dashboard active
-2. Show invoice in billing history
-3. Upgrade plan → Razorpay prorated payment
-4. Cancel subscription → “cancels at period end”
-5. Replay duplicate webhook in Razorpay dashboard → `already_processed` response
-
-## License
-
-Private — RegisterKaro assignment submission.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for data models, state machines, payment flows, webhook idempotency, and design trade-offs.

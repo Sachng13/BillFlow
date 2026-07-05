@@ -1,6 +1,6 @@
-# Architecture — RegisterKaro Billing Platform
+# Architecture
 
-This document explains **why** the system works the way it does. The assignment grades flow decisions and edge cases, not feature count.
+Design decisions, data model, and flow documentation for the subscription billing platform.
 
 ---
 
@@ -18,7 +18,7 @@ User (browser)
             └─► SMTP (transactional email)
 ```
 
-**Money is always stored in paise (integers).** Never floats.
+All monetary amounts are stored in **paise** (integer minor units). Floating-point currency is not used.
 
 ---
 
@@ -30,9 +30,9 @@ User (browser)
 
 ### Plan
 - `name`, `slug`, `amountPaise`, `intervalDays`, `features`
-- Seeded on first `GET /api/plans` if empty (Starter ₹499, Pro ₹1499, Enterprise ₹4999)
+- Default plans are seeded on first `GET /api/plans` if the collection is empty: Starter (₹499), Pro (₹1499), Enterprise (₹4999)
 
-### Subscription — state machine
+### Subscription
 
 ```
 pending ──payment confirmed──► active ──cancel──► active + cancelAtPeriodEnd=true
@@ -46,53 +46,52 @@ pending ──payment confirmed──► active ──cancel──► active + c
 |-------|---------|
 | `status` | `pending` / `active` / `cancelled` / `expired` / `payment_failed` |
 | `razorpayOrderId` | Original checkout order (unique) |
-| `cancelAtPeriodEnd` | Soft cancel — access until `currentPeriodEnd` |
-| `previousPlanId`, `planChangedAt` | Audit trail for upgrades/downgrades |
+| `cancelAtPeriodEnd` | Soft cancel — access continues until `currentPeriodEnd` |
+| `previousPlanId`, `planChangedAt` | Audit trail for plan changes |
 
 ### Invoice
-- One per charge (initial subscription, upgrade proration)
-- `draft` → `paid` or `void`
-- Linked to `subscriptionId` + `razorpayOrderId`
+- Created per charge (initial subscription or upgrade proration)
+- Status: `draft` → `paid` or `void`
+- Linked to `subscriptionId` and `razorpayOrderId`
 
 ### WebhookEvent
-- **Idempotency store** — `eventId` from Razorpay (unique)
-- Prevents double activation, double emails
+- Stores processed Razorpay `eventId` values (unique)
+- Ensures webhook side effects run exactly once
 
 ---
 
-## 3. Checkout & payment flow
+## 3. Checkout and payment
 
-### Decision: subscription starts as `pending`
+### Subscription starts as `pending`
 
-When user clicks “Get started”:
+1. `POST /api/checkout` creates a Razorpay order, a `pending` subscription, and a `draft` invoice
+2. Razorpay checkout modal opens in the browser
+3. On success, the client calls `POST /api/checkout/verify` with the payment signature
+4. The server verifies the HMAC signature and calls `completeOrderPayment()` to set the subscription to `active`, mark the invoice `paid`, and send emails
 
-1. `POST /api/checkout` creates Razorpay order, `pending` subscription, `draft` invoice
-2. Razorpay modal opens
-3. On success, client calls `POST /api/checkout/verify` with payment signature
-4. Server verifies HMAC → `completeOrderPayment()` → `active` subscription, `paid` invoice, emails
+A subscription remains `pending` until payment is confirmed server-side. Client-side checkout success alone does not activate access.
 
-**Why pending first?** Payment UI success ≠ money captured. Pending state makes “not yet paid” explicit.
+### Dual confirmation paths
 
-### Decision: dual confirmation paths
-
-| Path | When |
+| Path | Role |
 |------|------|
-| Client verify | Immediate UX after Razorpay modal (works on localhost) |
-| Webhook | Backup / production source of truth when server is publicly reachable |
+| Client verify (`/api/checkout/verify`) | Immediate activation after checkout; works on localhost |
+| Webhook (`/api/webhooks/razorpay`) | Server-to-server confirmation when the app is publicly reachable |
 
-Both call the same `completeOrderPayment()` function. Idempotency:
-- New subscription: skip if already `active`
-- Upgrade invoice: skip if invoice already `paid`
+Both paths call `completeOrderPayment()`. Repeated calls are safe:
 
-### Edge cases handled
+- New subscription: no-op if already `active`
+- Upgrade invoice: no-op if invoice already `paid`
+
+### Edge cases
 
 | Case | Behavior |
 |------|----------|
-| User already has `active` subscription | Checkout blocked — use upgrade |
-| User has `pending` subscription | Checkout blocked — complete or abandon first |
-| Duplicate webhook | `WebhookEvent.eventId` check → `already_processed` |
-| Verify + webhook both fire | Second call is no-op (`alreadyComplete`) |
-| Payment fails | Webhook `payment.failed` → `payment_failed` + void invoice |
+| User already has an `active` subscription | Checkout blocked; use upgrade instead |
+| User has a `pending` subscription | Checkout blocked until payment completes or is abandoned |
+| Duplicate webhook delivery | `WebhookEvent.eventId` lookup returns `already_processed` |
+| Verify and webhook both arrive | Second invocation is idempotent |
+| Payment fails | Webhook `payment.failed` sets `payment_failed` and voids the draft invoice |
 
 ---
 
@@ -100,126 +99,115 @@ Both call the same `completeOrderPayment()` function. Idempotency:
 
 **Endpoint:** `POST /api/webhooks/razorpay`
 
-### Steps
-1. Read raw body (required for signature)
-2. Verify `x-razorpay-signature` with `RAZORPAY_WEBHOOK_SECRET`
-3. Check `WebhookEvent` for `eventId` — if exists, return 200 `already_processed`
-4. Filter events: only `payment.captured`, `order.paid`, `payment.failed`
-5. Process side effects
-6. **Record `WebhookEvent` only after success** — failed processing returns 500 so Razorpay retries
+### Processing steps
 
-### Why record after success (not before)?
+1. Read the raw request body (required for signature verification)
+2. Verify `x-razorpay-signature` using `RAZORPAY_WEBHOOK_SECRET`
+3. Return `already_processed` if `eventId` exists in `WebhookEvent`
+4. Handle only `payment.captured`, `order.paid`, and `payment.failed`; other events return `ignored`
+5. Apply side effects via `completeOrderPayment()` or payment-failure handlers
+6. Persist `WebhookEvent` **after** successful processing; return 500 on failure so Razorpay can retry
 
-Recording before processing caused “poisoned” events: processing fails, event marked done, retry skipped. Recording after allows safe retries.
+### Idempotency
 
-### Events ignored
-`payment.authorized`, `subscription.*`, etc. — acknowledged with `ignored` (no side effects, no idempotency record needed).
+Events are recorded only after successful processing. Recording before processing would mark failed events as done and block legitimate retries.
+
+Unhandled event types are acknowledged without persisting an idempotency record.
 
 ---
 
 ## 5. Subscription lifecycle
 
-### Cancel
-- Sets `cancelAtPeriodEnd = true`, keeps `status: active`
+### Cancellation
+
+- Sets `cancelAtPeriodEnd = true` while keeping `status: active`
 - User retains access until `currentPeriodEnd`
-- Email sent once
-- **Lazy transition:** `GET /api/subscriptions` moves to `cancelled` when period has passed
+- Cancellation email is sent once
+- On `GET /api/subscriptions`, subscriptions past their period end with `cancelAtPeriodEnd` transition to `cancelled`
 
-**Trade-off:** No cron job in this assignment. Production would use a scheduled job. Lazy read is documented and sufficient for demo.
+There is no background cron in this implementation. A production deployment would use a scheduled job for period-end transitions.
 
-### Expired
-- Not auto-renewed in this MVP (no recurring Razorpay subscriptions API)
-- Documented as future work
+### Renewal and expiry
+
+Recurring billing via the Razorpay Subscriptions API is not implemented. Subscriptions do not auto-renew at period end in this version.
 
 ---
 
-## 6. Plan changes (upgrade / downgrade)
+## 6. Plan changes
 
 ### Upgrade (higher price)
-1. Calculate prorated charge: `(newPrice - oldPrice) × remainingDays / totalDays`
-2. If charge > 0: create Razorpay order + draft invoice, open payment modal
-3. **Plan changes only after payment** via `completeOrderPayment()` (upgrade path)
-4. Emails: plan changed, payment confirmed, invoice
+
+1. Prorated charge: `(newPrice - oldPrice) × remainingDays / totalDays`
+2. If charge > 0: create a Razorpay order and draft invoice; open checkout for the prorated amount
+3. Plan change is applied only after payment confirmation through `completeOrderPayment()`
+4. Emails: plan changed, payment confirmed, invoice generated
 
 ### Upgrade with zero proration
-- End of period, tiny difference rounds to 0 → apply immediately, no payment
+
+When the prorated amount rounds to zero, the plan is updated immediately with no payment step.
 
 ### Downgrade (lower price)
-- Apply immediately, no charge, no refund (documented trade-off — simpler than credit notes)
 
-**Alternative considered:** Change at period end for downgrades. Rejected for upgrade because users expect immediate feature access.
+Applied immediately with no charge and no refund. This avoids building a credit-note flow in the MVP.
 
 ---
 
 ## 7. Notifications
 
-| Event | Email |
-|-------|-------|
-| First payment | Subscription created + payment confirmed + invoice |
-| Upgrade payment | Plan changed + payment confirmed + invoice |
+| Event | Emails sent |
+|-------|-------------|
+| First payment | Subscription created, payment confirmed, invoice |
+| Upgrade payment | Plan changed, payment confirmed, invoice |
 | Downgrade | Plan changed |
-| Cancel | Cancellation with access-until date |
+| Cancellation | Cancellation notice with access-until date |
 
-**Sent exactly once** via webhook/verify idempotency. Email failures are logged but do not roll back payment (emails are best-effort; payment is source of truth).
+Emails are sent at most once per payment event, guarded by payment idempotency. SMTP failures are logged; they do not roll back a confirmed payment.
 
 ---
 
-## 8. Auth
+## 8. Authentication
 
-- JWT in `Authorization: Bearer` header for API routes
-- Client stores token in `localStorage` via `AuthProvider`
-- 7-day expiry
+- API routes accept `Authorization: Bearer <JWT>`
+- The client stores the token in `localStorage` via `AuthProvider`
+- Token expiry: 7 days
 
-**Trade-off:** No httpOnly cookies (XSS risk). Acceptable for assignment scope; production would use secure cookies + CSRF protection.
+Production hardening would typically move to httpOnly cookies and CSRF protection instead of localStorage.
 
 ---
 
 ## 9. Tests
 
-```
-__tests__/webhook.test.ts    — event filtering, idempotency helper, payload parsing
-__tests__/razorpay.test.ts   — HMAC signature verification
-__tests__/proration.test.ts    — upgrade charge calculation
-```
+| File | Coverage |
+|------|----------|
+| `__tests__/webhook.test.ts` | Event filtering, idempotency helper, payload parsing |
+| `__tests__/razorpay.test.ts` | HMAC signature verification |
+| `__tests__/proration.test.ts` | Upgrade proration calculation |
 
-Run: `npm test`
+```bash
+npm test
+```
 
 ---
 
-## 10. Production gaps (honest trade-offs)
+## 10. Known limitations
 
-| Gap | Production fix |
-|-----|----------------|
-| No cron for cancel/expiry | Scheduled job or queue |
-| Invoice numbers via `countDocuments` | Atomic counter or UUID |
-| JWT in localStorage | httpOnly session cookies |
-| No rate limiting on auth | Add middleware |
-| Single Razorpay order model | Razorpay Subscriptions API for true recurring |
+| Area | Current behavior | Production follow-up |
+|------|------------------|----------------------|
+| Period-end transitions | Lazy update on subscription read | Scheduled job or queue worker |
+| Invoice numbering | `countDocuments()` based | Atomic counter or UUID |
+| Auth storage | JWT in localStorage | httpOnly cookies |
+| API protection | Per-route JWT check | Rate limiting on auth endpoints |
+| Billing model | One-off Razorpay orders | Razorpay Subscriptions API for recurring charges |
 
 ---
 
-## 11. Key files
+## 11. Key source files
 
 | File | Responsibility |
 |------|----------------|
-| `src/lib/activateSubscription.ts` | `completeOrderPayment()` — new sub + upgrade |
-| `src/lib/webhook.ts` | Event filter, payload parsers, idempotency helper |
-| `src/lib/proration.ts` | Prorated upgrade math |
-| `src/lib/subscriptionLifecycle.ts` | Lazy cancel transition |
-| `src/app/api/webhooks/razorpay/route.ts` | Webhook entry point |
-
----
-
-## 12. Interview talking points
-
-Be ready to explain:
-
-1. **Why pending before active?** — Payment not confirmed until verify/webhook
-2. **Why both verify and webhook?** — Local dev + production reliability
-3. **How duplicate webhooks are handled?** — `WebhookEvent.eventId` + order/invoice idempotency
-4. **What does cancel mean?** — Soft cancel, access until period end
-5. **Upgrade proration formula** — Proportional to remaining days
-6. **What breaks without ngrok?** — Webhook won't arrive; verify still works
-7. **Email failure** — Logged, payment still succeeds
-
-This is the mindset RegisterKaro grades: **sound decisions when the happy path breaks.**
+| `src/lib/activateSubscription.ts` | `completeOrderPayment()` for new subscriptions and upgrades |
+| `src/lib/webhook.ts` | Event filtering, payload parsing, idempotency helpers |
+| `src/lib/proration.ts` | Prorated upgrade charge calculation |
+| `src/lib/subscriptionLifecycle.ts` | Lazy cancellation transition |
+| `src/lib/razorpayVerify.ts` | Payment and webhook signature verification |
+| `src/app/api/webhooks/razorpay/route.ts` | Webhook HTTP handler |
