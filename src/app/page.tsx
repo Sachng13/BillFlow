@@ -1,13 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { AuthProvider } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 
 export default function HomePage() {
   return (
-    <AuthProvider>
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-orange-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-orange-50">
         <Navbar />
         <main className="max-w-4xl mx-auto px-6 py-24 text-center">
           <div className="inline-flex items-center gap-2 bg-orange-100 text-orange-700 text-sm font-medium px-4 py-1.5 rounded-full mb-8">
@@ -66,6 +64,5 @@ export default function HomePage() {
           </div>
         </main>
       </div>
-    </AuthProvider>
   );
 }

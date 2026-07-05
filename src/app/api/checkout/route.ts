@@ -6,13 +6,13 @@ import { Invoice } from "@/models/Invoice";
 import { razorpay } from "@/lib/razorpay";
 import { getAuthUser } from "@/lib/auth";
 import { User } from "@/models/User";
+import { logError } from "@/lib/logger";
 
 /**
  * POST /api/checkout
  *
  * Decision: Subscription is created with status "pending" here.
- * It only transitions to "active" when the webhook confirms payment.capture.
- * This avoids race conditions between client-side success callbacks and actual money movement.
+ * It transitions to "active" when payment is confirmed via verify or webhook.
  *
  * Edge case: If user already has an active subscription, we block checkout
  * (they should upgrade instead).
@@ -36,16 +36,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Plan not found" }, { status: 404 });
     }
 
-    // Block if user already has an active subscription
-    const existingActive = await Subscription.findOne({
+    // Block if user already has an active or pending subscription
+    const existing = await Subscription.findOne({
       userId: authUser.userId,
-      status: "active",
+      status: { $in: ["active", "pending"] },
     });
-    if (existingActive) {
-      return NextResponse.json(
-        { error: "You already have an active subscription. Use upgrade/downgrade instead." },
-        { status: 409 }
-      );
+    if (existing) {
+      const msg =
+        existing.status === "active"
+          ? "You already have an active subscription. Use upgrade/downgrade instead."
+          : "You have a pending checkout. Complete payment or wait before starting a new one.";
+      return NextResponse.json({ error: msg }, { status: 409 });
     }
 
     const user = await User.findById(authUser.userId);
@@ -99,7 +100,7 @@ export async function POST(req: NextRequest) {
       subscriptionId: subscription._id,
     });
   } catch (err) {
-    console.error("[checkout/POST]", err);
+    logError("checkout.failed", err);
     return NextResponse.json({ error: "Failed to create order" }, { status: 500 });
   }
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AuthProvider, useAuth } from "@/components/AuthProvider";
+import { useAuth } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 
 interface Plan {
@@ -76,10 +76,34 @@ function PlansContent() {
         description: `${data.planName} Subscription`,
         prefill: { name: data.userName, email: data.userEmail },
         theme: { color: "#F97316" },
-        handler: () => {
-          // Webhook is the source of truth — client handler just redirects.
-          // We show a "pending" message; webhook will activate it.
-          router.push("/dashboard?payment=pending");
+        handler: async (response: {
+          razorpay_order_id: string;
+          razorpay_payment_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const verifyRes = await fetch("/api/checkout/verify", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              }),
+            });
+            const verifyData = await verifyRes.json();
+            if (!verifyRes.ok) {
+              alert(verifyData.error ?? "Payment verification failed");
+              return;
+            }
+            router.push("/dashboard?payment=success");
+          } catch {
+            alert("Payment verification failed. Please refresh your dashboard in a moment.");
+            router.push("/dashboard?payment=pending");
+          }
         },
         modal: {
           ondismiss: () => setCheckoutLoading(null),
@@ -168,9 +192,5 @@ function PlansContent() {
 }
 
 export default function PlansPage() {
-  return (
-    <AuthProvider>
-      <PlansContent />
-    </AuthProvider>
-  );
+  return <PlansContent />;
 }

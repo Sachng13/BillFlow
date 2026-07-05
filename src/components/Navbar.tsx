@@ -5,7 +5,7 @@ import { useAuth } from "./AuthProvider";
 import { useRouter } from "next/navigation";
 
 export default function Navbar() {
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading } = useAuth();
   const router = useRouter();
 
   const handleLogout = () => {
@@ -24,7 +24,9 @@ export default function Navbar() {
         </Link>
 
         <div className="flex items-center gap-4">
-          {user ? (
+          {isLoading ? (
+            <div className="h-8 w-32" aria-hidden="true" />
+          ) : user ? (
             <>
               <Link href="/plans" className="text-sm text-slate-600 hover:text-slate-900">
                 Plans

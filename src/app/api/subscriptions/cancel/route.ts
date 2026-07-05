@@ -5,6 +5,7 @@ import { Plan } from "@/models/Plan";
 import { User } from "@/models/User";
 import { getAuthUser } from "@/lib/auth";
 import { sendSubscriptionCancelled } from "@/lib/email";
+import { logError } from "@/lib/logger";
 
 /**
  * POST /api/subscriptions/cancel
@@ -51,11 +52,15 @@ export async function POST(req: NextRequest) {
   const user = await User.findById(authUser.userId);
   const plan = await Plan.findById(subscription.planId);
   if (user && plan) {
-    await sendSubscriptionCancelled(
-      user.email,
-      plan.name,
-      subscription.currentPeriodEnd
-    );
+    try {
+      await sendSubscriptionCancelled(
+        user.email,
+        plan.name,
+        subscription.currentPeriodEnd
+      );
+    } catch (err) {
+      logError("cancel.email_failed", err);
+    }
   }
 
   return NextResponse.json({

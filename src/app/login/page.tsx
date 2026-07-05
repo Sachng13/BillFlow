@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AuthProvider, useAuth } from "@/components/AuthProvider";
+import { useAuth } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 
 function LoginForm() {
@@ -94,9 +94,5 @@ function LoginForm() {
 }
 
 export default function LoginPage() {
-  return (
-    <AuthProvider>
-      <LoginForm />
-    </AuthProvider>
-  );
+  return <LoginForm />;
 }

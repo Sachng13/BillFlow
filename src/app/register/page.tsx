@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AuthProvider, useAuth } from "@/components/AuthProvider";
+import { useAuth } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 
 function RegisterForm() {
@@ -107,9 +107,5 @@ function RegisterForm() {
 }
 
 export default function RegisterPage() {
-  return (
-    <AuthProvider>
-      <RegisterForm />
-    </AuthProvider>
-  );
+  return <RegisterForm />;
 }

@@ -66,8 +66,6 @@ const SubscriptionSchema = new Schema<ISubscription>(
 
 // Index for fast user lookups
 SubscriptionSchema.index({ userId: 1, status: 1 });
-// Index for webhook deduplication lookups
-SubscriptionSchema.index({ razorpayOrderId: 1 });
 SubscriptionSchema.index({ razorpayPaymentId: 1 });
 
 export const Subscription =

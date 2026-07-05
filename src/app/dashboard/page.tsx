@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AuthProvider, useAuth } from "@/components/AuthProvider";
+import { useAuth } from "@/components/AuthProvider";
 import Navbar from "@/components/Navbar";
 import { Suspense } from "react";
 
@@ -42,6 +42,22 @@ const STATUS_COLORS: Record<string, string> = {
   payment_failed: "bg-red-100 text-red-600",
 };
 
+declare global {
+  interface Window {
+    Razorpay: new (options: Record<string, unknown>) => { open: () => void };
+  }
+}
+
+async function loadRazorpayScript() {
+  if (window.Razorpay) return;
+  await new Promise<void>((resolve) => {
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve();
+    document.body.appendChild(script);
+  });
+}
+
 function DashboardContent() {
   const { user, token, isLoading } = useAuth();
   const router = useRouter();
@@ -58,10 +74,13 @@ function DashboardContent() {
   }, [user, isLoading, router]);
 
   useEffect(() => {
-    if (searchParams.get("payment") === "pending") {
+    const payment = searchParams.get("payment");
+    if (payment === "pending") {
       setMessage(
-        "Payment submitted! Your subscription will activate shortly once confirmed. Refresh in a moment."
+        "Payment submitted! Your subscription will activate shortly once confirmed."
       );
+    } else if (payment === "success") {
+      setMessage("Payment successful! Your subscription is now active.");
     }
   }, [searchParams]);
 
@@ -81,6 +100,18 @@ function DashboardContent() {
     setAllPlans(plansData.plans ?? []);
     setLoading(false);
   }, [token]);
+
+  // Poll for activation when subscription is still pending after payment
+  useEffect(() => {
+    const payment = searchParams.get("payment");
+    if (!token || !payment || subscription?.status !== "pending") return;
+
+    const interval = setInterval(() => {
+      fetchData();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [token, searchParams, subscription?.status, fetchData]);
 
   useEffect(() => {
     if (token) fetchData();
@@ -104,6 +135,7 @@ function DashboardContent() {
   };
 
   const handleUpgrade = async (newPlanId: string) => {
+    if (!token || !user) return;
     setActionLoading(true);
     try {
       const res = await fetch("/api/subscriptions/upgrade", {
@@ -115,9 +147,65 @@ function DashboardContent() {
         body: JSON.stringify({ newPlanId }),
       });
       const data = await res.json();
-      if (!res.ok) { alert(data.error); return; }
-      setMessage(`${data.message} to ${data.newPlan}${data.chargeAmountPaise > 0 ? ` — prorated charge: ₹${data.chargeAmountPaise / 100}` : " (no charge)"}`);
-      fetchData();
+      if (!res.ok) {
+        alert(data.error);
+        return;
+      }
+
+      // Downgrade — no payment needed
+      if (!data.requiresPayment) {
+        setMessage(`${data.message} to ${data.newPlan}`);
+        fetchData();
+        return;
+      }
+
+      // Upgrade with prorated charge — open Razorpay
+      await loadRazorpayScript();
+
+      const rzp = new window.Razorpay({
+        key: data.keyId,
+        amount: data.chargeAmountPaise,
+        currency: data.currency ?? "INR",
+        order_id: data.orderId,
+        name: "BillFlow",
+        description: `Upgrade to ${data.newPlan}`,
+        prefill: { name: data.userName ?? user.name, email: data.userEmail ?? user.email },
+        theme: { color: "#F97316" },
+        handler: async (response: {
+          razorpay_order_id: string;
+          razorpay_payment_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const verifyRes = await fetch("/api/checkout/verify", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              }),
+            });
+            const verifyData = await verifyRes.json();
+            if (!verifyRes.ok) {
+              alert(verifyData.error ?? "Payment verification failed");
+              return;
+            }
+            setMessage(`Upgraded to ${data.newPlan}! Prorated charge: ₹${data.chargeAmountPaise / 100}`);
+            fetchData();
+          } catch {
+            alert("Payment verification failed. Please refresh your dashboard.");
+            fetchData();
+          }
+        },
+        modal: {
+          ondismiss: () => setActionLoading(false),
+        },
+      });
+      rzp.open();
     } finally {
       setActionLoading(false);
     }
@@ -266,10 +354,8 @@ function DashboardContent() {
 
 export default function DashboardPage() {
   return (
-    <AuthProvider>
-      <Suspense>
-        <DashboardContent />
-      </Suspense>
-    </AuthProvider>
+    <Suspense>
+      <DashboardContent />
+    </Suspense>
   );
 }
